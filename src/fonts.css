@@ -1,0 +1,22 @@
+/* Web font sources to ensure dyslexia fonts work without local install */
+@import url('https://fonts.googleapis.com/css2?family=Lexend:wght@400;700;900&display=swap');
+
+@font-face {
+  font-family: "OpenDyslexic";
+  font-style: normal;
+  font-weight: 400;
+  src:
+    local("OpenDyslexic"),
+    url("https://cdn.jsdelivr.net/gh/antijingoist/open-dyslexic/woff/OpenDyslexic-Regular.woff") format("woff");
+  font-display: swap;
+}
+@font-face {
+  font-family: "OpenDyslexic";
+  font-style: normal;
+  font-weight: 700;
+  src:
+    local("OpenDyslexic Bold"),
+    url("https://cdn.jsdelivr.net/gh/antijingoist/open-dyslexic/woff/OpenDyslexic-Bold.woff") format("woff");
+  font-display: swap;
+}
+

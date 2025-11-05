@@ -1,0 +1,222 @@
+﻿from __future__ import annotations
+
+"""
+BLIP-only image description generator.
+
+What this module does
+---------------------
+- Loads Salesforce BLIP (image captioning) once.
+- Generates detailed descriptions via prompt steering. No Flickr8k index,
+  no heavy detectors, keeping it quick and portable.
+- Supports optional region crop (x,y,w,h).
+
+Public API
+----------
+    cap = ShowTellCaptioner(model_root="./models")
+    one_line = cap.caption(pil_image)
+    desc = cap.describe(pil_image)  # -> {"objects": "...", "sentences": [...], "paragraph": "..."}
+
+Notes
+-----
+- Uses an extra fast fruit pass to surface specific fruit names (apple, banana, ...),
+  improving recall when BLIP says only "fruit(s)".
+- Keeps generation short and beam counts low to remain responsive.
+"""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Optional, List, Any
+
+from PIL import Image
+
+import torch
+from transformers import BlipForConditionalGeneration, BlipProcessor
+
+
+# ---------------- small text helpers ----------------
+
+def _clean(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+    # Collapse whitespace and ensure terminal punctuation.
+    s = " ".join(s.split())
+    if s[-1] not in ".!?":
+        s += "."
+    return s
+
+def _split_into_sentences(text: str) -> List[str]:
+    # Very light split; BLIP outputs short sentences typically.
+    if not text:
+        return []
+    parts = []
+    buf = []
+    for ch in text.strip():
+        buf.append(ch)
+        if ch in ".!?":
+            chunk = "".join(buf).strip()
+            if chunk:
+                parts.append(chunk)
+            buf = []
+    rest = "".join(buf).strip()
+    if rest:
+        parts.append(rest)
+    return parts
+
+
+# ---------------- main captioner (BLIP) ----------------
+
+@dataclass
+class _GenConfig:
+    max_new_tokens: int = 60
+    num_beams: int = 3
+    repetition_penalty: float = 1.1
+    length_penalty: float = 1.0
+    temperature: float = 0.7
+    top_p: float = 0.95
+
+
+class ShowTellCaptioner:
+    """
+    BLIP-only captioner with object-enumeration prompting.
+    """
+
+    def __init__(
+        self,
+        model_root: Path | str,
+        *,
+        blip_ckpt: str = "Salesforce/blip-image-captioning-base",
+        device: Optional[str] = None,
+        gen: Optional[_GenConfig] = None,
+    ):
+        self.model_root = Path(model_root)
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.cfg = gen or _GenConfig()
+
+        # Load BLIP
+        self.processor = BlipProcessor.from_pretrained(blip_ckpt)
+        self.model = BlipForConditionalGeneration.from_pretrained(
+            blip_ckpt, torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
+        )
+        self.model.to(self.device)
+        self.model.eval()
+
+    # ---------- utils ----------
+
+    @staticmethod
+    def _crop_region(image: Image.Image, region: Optional[Dict[str, int]]) -> Image.Image:
+        if not region:
+            return image
+        try:
+            x = max(0, int(region.get("x", 0))); y = max(0, int(region.get("y", 0)))
+            w = max(1, int(region.get("w", 1))); h = max(1, int(region.get("h", 1)))
+            return image.crop((x, y, x + w, y + h))
+        except Exception:
+            return image
+
+    @torch.no_grad()
+    def _generate(
+        self,
+        pil: Image.Image,
+        prompt: str,
+        max_new: int,
+        *,
+        num_beams: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ) -> str:
+        inputs = self.processor(images=pil, text=prompt, return_tensors="pt").to(self.device)
+        out = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new,
+            num_beams=num_beams if num_beams is not None else self.cfg.num_beams,
+            repetition_penalty=self.cfg.repetition_penalty,
+            length_penalty=self.cfg.length_penalty,
+            temperature=temperature if temperature is not None else self.cfg.temperature,
+            top_p=top_p if top_p is not None else self.cfg.top_p,
+        )
+        text = self.processor.decode(out[0], skip_special_tokens=True)
+        return text.strip()
+
+    # ---------- API ----------
+
+    def caption(self, image: Image.Image, *, region: Optional[Dict[str, int]] = None) -> str:
+        """
+        Short, fluent one-liner using BLIP only.
+        """
+        pil = self._crop_region(image, region)
+        prompt = "A short caption describing the scene in a simple sentence."
+        text = self._generate(pil, prompt, max_new=30)
+        return _clean(text)
+
+    def describe(
+        self,
+        image: Image.Image,
+        *,
+        region: Optional[Dict[str, int]] = None,
+        detail_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Returns a structured, detailed result using BLIP-only prompting.
+
+        Output:
+            {
+              "objects": "3 apples, 2 bananas, 1 orange, a wicker basket",
+              "sentences": [...],
+              "paragraph": "In this image, ..."
+            }
+        """
+        pil = self._crop_region(image, region)
+
+        # Fast pass A: explicitly surface fruit names (helps when BLIP says only "fruit(s)")
+        fruit_prompt = (
+            "List distinct fruit types you can see, comma-separated (just names like 'apples, bananas, grapes')."
+        )
+        fruit_line = self._generate(pil, fruit_prompt, max_new=20, num_beams=1, temperature=0.7, top_p=0.9)
+        fruit_line = fruit_line.replace("Fruits:", "").replace("fruits:", "").strip().strip(" .")
+
+        # Fast pass B: enumerate all objects with rough counts
+        obj_prompt = (
+            "List visible objects with approximate counts as a short comma-separated list. "
+            "Example: '3 apples, 2 bananas, 1 orange, a wicker basket'."
+        )
+        objects_line = self._generate(pil, obj_prompt, max_new=30, num_beams=2, temperature=0.7, top_p=0.9)
+        objects_line = objects_line.replace("Objects:", "").replace("objects:", "").strip()
+        objects_line = objects_line.strip().strip(" .")
+
+        # If objects contain generic 'fruit(s)', replace with explicit fruit names if available
+        if fruit_line:
+            fruits = [t.strip() for t in fruit_line.split(",") if t.strip()]
+            if fruits and ("fruit" in objects_line.lower()):
+                # Remove 'fruit' tokens and append specific fruits
+                import re as _re
+                tmp = _re.sub(r"\b\d+\s+fruits?\b", "", objects_line, flags=_re.I)
+                tmp = _re.sub(r"\bfruits?\b", "", tmp, flags=_re.I)
+                tmp = ", ".join([s.strip(" ,") for s in tmp.split(",") if s.strip(" ,")])
+                extra = ", ".join(fruits)
+                objects_line = ", ".join([p for p in [tmp, extra] if p])
+
+        # Pass 2: ask for a detailed, child-friendly paragraph that mentions those objects.
+        detail_prompt = detail_prompt or (
+            "Write a detailed, child-friendly description that mentions every listed object, "
+            "their colors, approximate counts, and how they are arranged."
+        )
+        if objects_line:
+            prompt2 = (
+                f"{detail_prompt} Use this list of objects exactly once: {objects_line}. "
+                "Keep it factual and clear."
+            )
+        else:
+            # Fallback: no explicit list found â€” still ask for a detailed description.
+            prompt2 = detail_prompt
+
+        paragraph = self._generate(pil, prompt2, max_new=self.cfg.max_new_tokens, num_beams=self.cfg.num_beams)
+        paragraph = _clean(paragraph)
+        sentences = _split_into_sentences(paragraph)
+
+        return {
+            "objects": objects_line,
+            "sentences": sentences,
+            "paragraph": paragraph,
+        }

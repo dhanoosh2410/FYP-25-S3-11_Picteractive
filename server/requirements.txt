@@ -1,0 +1,34 @@
+# FastAPI stack
+fastapi>=0.110,<1
+uvicorn[standard]>=0.22,<1
+python-multipart>=0.0.9,<1
+
+# Core utils
+pillow>=10,<12
+numpy>=1.26,<3
+tqdm>=4.66,<5
+python-dotenv>=1.0,<2
+httpx>=0.27,<1
+openai>=1.0,<2
+
+# Captioning (InstructBLIP path only)
+transformers>=4.41,<5
+accelerate>=0.27,<1
+timm>=0.9,<1.1
+safetensors>=0.4,<1
+torch>=2.2          # install with the correct index-url for CPU/GPU (see note below)
+
+# Optional: color-vision module (keep if you use CVD simulate/daltonize)
+colorspacious>=1.1,<2
+
+# TTS + Dictionary
+pyttsx3>=2.90,<3
+pywin32; platform_system == "Windows"
+nltk>=3.8,<4
+
+# Translate
+deep-translator>=1.11,<2
+
+# Auth/DB and other app pieces you already use
+SQLAlchemy>=2.0,<3
+psycopg2-binary>=2.9,<3
