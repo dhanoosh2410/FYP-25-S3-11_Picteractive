@@ -282,13 +282,14 @@ def register_user(payload: dict, response: Response, db: Session = Depends(get_d
     sid = create_session(user.id, db)
     # Persist cookie across browser restarts within TTL
     response.set_cookie(
-        key="session_id",
-        value=sid,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=SESSION_TTL_MIN * 60,
-    )
+    key="session_id",
+    value=sid,
+    httponly=True,
+    samesite="none",
+    secure=True,
+    path="/",
+    max_age=SESSION_TTL_MIN * 60,)
+
 
     return {"message": "Registration successful", "user": {"id": user.id, "username": user.username}}
 
