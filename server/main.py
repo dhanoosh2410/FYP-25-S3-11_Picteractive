@@ -297,12 +297,6 @@ def _warm_start():
         _init_instructblip()
     except Exception:
         pass
-    # Seed demo admin user in the auth subapp DB (idempotent)
-    try:
-        from .auth_DB import _seed_admin_user  # type: ignore
-        _seed_admin_user()
-    except Exception:
-        pass
 
 
 @app.get("/api/health")
