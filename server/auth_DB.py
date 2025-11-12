@@ -86,7 +86,7 @@ def get_db():
     try:
         yield db
     finally:
-    db.close()
+        db.close()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -268,6 +268,37 @@ def _ensure_settings_shape(s: dict | str | None) -> dict:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+# Seed a default admin account at startup (for demo/verification on Vercel)
+@app.on_event("startup")
+def _seed_admin_user():
+    try:
+        db = SessionLocal()
+        # If either username or email already exists, skip seeding
+        existing = db.query(User).filter(or_(User.username == "admin", User.email == "admin@example.com")).first()
+        if existing is None:
+            demo_settings = _ensure_settings_shape(DEFAULT_SETTINGS)
+            demo_ach = _ensure_achievements_shape({})
+            user = User(
+                username="admin",
+                email="admin@example.com",
+                password="admin1",
+                settings=demo_settings,
+                achievements=demo_ach,
+            )
+            db.add(user)
+            db.commit()
+    except Exception:
+        # Best-effort seed; do not crash app if seeding fails
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 @app.post("/api/auth/register")
 def register_user(payload: dict, request: Request, response: Response, db: Session = Depends(get_db)):
