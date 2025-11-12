@@ -7,6 +7,7 @@ import re
 import json
 import time
 import uuid
+import base64
 import tempfile
 from hashlib import sha1
 from pathlib import Path
@@ -18,12 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-import torch
 from PIL import Image
-from transformers import (
-    InstructBlipProcessor,
-    InstructBlipForConditionalGeneration,
-)
 
 # --- App + subapps / engines you already had ---
 from .auth_DB import app as auth_subapp
@@ -85,10 +81,9 @@ def _save_items(items):
     ITEMS_JSON.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ---------- Single, reliable captioner (InstructBLIP) ----------
-_INSTRUCT_PROC = None
-_INSTRUCT_MODEL = None
-_INSTRUCT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# ---------- OpenAI client (caption provider) ----------
+from openai import OpenAI
+_openai_client = OpenAI()
 
 # Tiny in-memory caption cache (per-process)
 _CAP_CACHE: dict[str, dict] = {}
@@ -107,20 +102,6 @@ def _cap_cache_put(k: str, v: dict):
         except Exception:
             _CAP_CACHE.clear()
     _CAP_CACHE[k] = v
-
-
-def _init_instructblip():
-    """Load once; reused for all caption requests."""
-    global _INSTRUCT_PROC, _INSTRUCT_MODEL
-    if _INSTRUCT_PROC is not None and _INSTRUCT_MODEL is not None:
-        return True
-    name = "Salesforce/instructblip-flan-t5-xl"  # change to '-large' for lower CPU RAM/time
-    _INSTRUCT_PROC = InstructBlipProcessor.from_pretrained(name)
-    _INSTRUCT_MODEL = InstructBlipForConditionalGeneration.from_pretrained(
-        name,
-        torch_dtype=(torch.float16 if _INSTRUCT_DEVICE == "cuda" else torch.float32),
-    ).to(_INSTRUCT_DEVICE).eval()
-    return True
 
 
 # ---------- Object parsing helpers (fruits/veggies/animals/birds) ----------
@@ -213,22 +194,13 @@ def _split_sentences(text: str):
     return [p.strip() for p in parts if p.strip()]
 
 
-# ---------- Speed presets ----------
-def _gen_kwargs_for(speed: str) -> dict:
-    s = (speed or "balanced").lower()
-    if s == "fast":
-        # much faster; still coherent
-        return dict(max_new_tokens=64, num_beams=1, do_sample=True, top_p=0.9, temperature=0.7)
-    if s == "thorough":
-        return dict(max_new_tokens=220, num_beams=5)
-    # balanced
-    return dict(max_new_tokens=180, num_beams=3)
-
-
-# ---------- Caption core ----------
-def _detailed_caption_instructblip(pil: Image.Image, region=None, *, speed: str = "fast") -> dict:
-    """Return {caption, sentences, paragraph, labels, objects, mode} using ONE model."""
-    # Optional region crop
+# ---------- Caption core (OpenAI Vision) ----------
+def _detailed_caption_openai(pil: Image.Image, region=None, *, speed: str = "fast") -> dict:
+    """
+    Returns a ONE-SENTENCE caption (plus derived fields).
+    Uses OpenAI Vision via Chat Completions with strict prompt & post-processing.
+    """
+    # Optional crop
     if region:
         try:
             x = max(0, int(region.get("x", 0)))
@@ -239,37 +211,67 @@ def _detailed_caption_instructblip(pil: Image.Image, region=None, *, speed: str 
         except Exception:
             pass
 
-    _init_instructblip()
+    # Encode image → base64 data URL
+    buf = io.BytesIO()
+    pil.save(buf, format="JPEG", quality=92)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
 
-    # ✅ Natural paragraph only — no headings, no bullets, no labels
+    # Single-sentence, factual, object+count oriented instruction
     instruction = (
-        "Describe the image in one detailed paragraph (4–6 sentences). "
-        "Naturally mention every clearly visible object and its quantity using simple nouns and numerals "
-        "(e.g., '3 apples', '2 sparrows'). Include salient attributes like colors, materials, and relative positions. "
-        "Do not invent objects. Do not start with labels or headings; write only the paragraph."
+        "Describe this image in EXACTLY ONE clear sentence (under 30 words), "
+        "naming the main objects with numerals for counts (e.g., '3 apples'), "
+        "plus one or two key attributes (e.g., color/material/setting). "
+        "Do not hedge or invent details. Output only the sentence."
     )
 
-    inputs = _INSTRUCT_PROC(images=pil, text=instruction, return_tensors="pt").to(_INSTRUCT_DEVICE)
-    gen_kwargs = _gen_kwargs_for(speed)
-    with torch.inference_mode():
-        out = _INSTRUCT_MODEL.generate(**inputs, **gen_kwargs)
-    text = _INSTRUCT_PROC.batch_decode(out, skip_special_tokens=True)[0].strip()
+    # Modest token budget; cooler temperature for factual captions
+    max_tokens = 60
+    temperature = 0.4
 
-    # Clean up in case the model ever sneaks in a "Description:" prefix
-    desc = re.sub(r"(?i)^\s*description:\s*", "", text).strip()
-    sentences = _split_sentences(desc)
-    paragraph = desc if re.search(r"[\.!?]$", desc) else (desc + ".")
-    caption = sentences[0] if sentences else paragraph
+    try:
+        r = _openai_client.chat.completions.create(
+            model=os.getenv("CAPTION_OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instruction},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = (r.choices[0].message.content or "").strip()
+    except Exception as e:
+        if (os.getenv("CAPTION_DEBUG", "").lower() in {"1","true","yes","on"}):
+            import sys, traceback
+            print(f"[caption] OpenAI error: {type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc()
+        text = ""
 
-    # Parse objects directly from the prose (digits or number-words)
-    objects = _parse_objects_from_text(paragraph)
+    # Normalize → ONE sentence
+    text = re.sub(r"(?i)^\s*description:\s*", "", text).strip()
+    # Split and keep first sentence only
+    parts = re.split(r'(?<=[\.!?])\s+', text) if text else []
+    one = (parts[0] if parts else "").strip()
+    # If model forgot punctuation, add a period
+    if one and one[-1] not in ".!?":
+        one += "."
+
+    # Fallback if empty
+    if not one:
+        one = "A clear, concise description could not be generated."
+
+    # Derive objects from the one-liner
+    objects = _parse_objects_from_text(one)
 
     return {
-        "caption": caption,
-        "sentences": sentences,
-        "paragraph": paragraph,
+        "caption": one,                 # ← your UI reads this
+        "sentences": [one],
+        "paragraph": one,
         "labels": [],
-        "objects": objects,   # [{"name":"apple","count":3,"category":"fruit"}, ...]
+        "objects": objects,
         "mode": "detailed",
     }
 
@@ -292,12 +294,7 @@ def _ensure_story_engine():
 
 @app.on_event("startup")
 def _warm_start():
-    # Warm the caption model so the first request is fast
-    try:
-        _init_instructblip()
-    except Exception:
-        pass
-    # Seed demo admin user in the auth subapp DB (idempotent)
+    # Nothing to warm for OpenAI caption path
     try:
         from .auth_DB import _seed_admin_user  # type: ignore
         _seed_admin_user()
@@ -308,12 +305,12 @@ def _warm_start():
 @app.get("/api/health")
 async def health():
     eng = _ensure_story_engine()
-    cap_ready = True  # captioner warm-loaded
+    cap_ready = True  # OpenAI path
     return {
         "ok": bool(getattr(eng, "ready", False)) and cap_ready,
         "captioner": cap_ready,
         "storygen": bool(getattr(eng, "ready", False)),
-        "device": _INSTRUCT_DEVICE,
+        "device": "api",   # previously cuda/cpu
         "error": getattr(eng, "err", None),
     }
 
@@ -325,7 +322,7 @@ def story_status():
         "ready": bool(getattr(eng, "ready", False)),
         "mode": getattr(eng, "_mode", None),
         "model": getattr(eng, "model_name", ""),
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "device": "api",
         "err": getattr(eng, "err", None),
     }
 
@@ -342,7 +339,7 @@ def story_test():
     return {"title": t, "panels": p, "story": "\n".join(p)}
 
 
-# ---------- Caption (single-model, fast default + cached) ----------
+# ---------- Caption (OpenAI-backed + cached) ----------
 @app.post("/api/caption")
 async def caption(
     image: UploadFile = File(...),
@@ -366,7 +363,7 @@ async def caption(
             region_box = None
 
     # cache key on (image bytes + region + speed + mode)
-    key = sha1(b"v3|" + raw + b"|" + region_norm.encode() + b"|" + str(speed).encode() + b"|" + str(mode).encode()).hexdigest()
+    key = sha1(b"v4|" + raw + b"|" + region_norm.encode() + b"|" + str(speed).encode() + b"|" + str(mode).encode()).hexdigest()
     hit = _cap_cache_get(key)
     if hit is not None:
         if (mode or "").lower() not in ("detailed", "description"):
@@ -374,7 +371,7 @@ async def caption(
         return hit
 
     try:
-        result = _detailed_caption_instructblip(pil, region=region_box, speed=(speed or "fast"))
+        result = _detailed_caption_openai(pil, region=region_box, speed=(speed or "fast"))
         _cap_cache_put(key, result)
         if (mode or "").lower() not in ("detailed", "description"):
             return {"caption": (result.get("caption") or "").strip()}
@@ -700,14 +697,11 @@ def api_dictionary(word: str):
         "examples": examples[:3],
     }
 
-# server/main.py (temporary)
-from openai import OpenAI
-client = OpenAI()
-
+# Simple OpenAI ping (kept)
 @app.get("/api/openai_ping")
 def openai_ping():
     try:
-        r = client.chat.completions.create(
+        r = _openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"user","content":"Respond with OK"}],
             max_tokens=3,
