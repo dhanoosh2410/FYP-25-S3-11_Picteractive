@@ -8,16 +8,62 @@ import secrets
 import re
 import json
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 import os
 
 # ---------------------------------------------------------------------------
-# Database (SQLite)
+# Database (SQLite local by default; Postgres on Render via DATABASE_URL)
 # ---------------------------------------------------------------------------
-DB_PATH = "server/data/app.db"
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+DEFAULT_DB_PATH = Path("server/data/app.db")
+DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+def _normalize_db_url(raw: str) -> str:
+    """
+    - Accepts sqlite / postgres URLs from env
+    - Normalizes postgres:// -> postgresql:// for SQLAlchemy
+    - Appends sslmode=require for hosted Postgres if missing
+    """
+    if not raw:
+        return f"sqlite:///{DEFAULT_DB_PATH}"
+
+    url = raw.strip()
+
+    # Normalize scheme
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    # If it's sqlite, keep as-is
+    if url.startswith("sqlite:///"):
+        return url
+
+    # Ensure sslmode=require for hosted Postgres
+    if url.startswith("postgresql://"):
+        parsed = urlparse(url)
+        q = dict(parse_qsl(parsed.query or ""))
+        if "sslmode" not in q:
+            q["sslmode"] = "require"
+        url = urlunparse(parsed._replace(query=urlencode(q)))
+    return url
+
+DATABASE_URL = _normalize_db_url(os.getenv("DATABASE_URL", "").strip())
+
+# Create engine with appropriate args
+if DATABASE_URL.startswith("sqlite:///"):
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+else:
+    # Postgres (Render) or any other server DB
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        future=True,
+    )
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -35,8 +81,6 @@ class User(Base):
     settings = Column(JSON, default=dict)
     achievements = Column(JSON, default=dict)
 
-Base.metadata.create_all(bind=engine)
-
 # ---------------------------------------------------------------------------
 # Persistent Sessions (DB-backed)
 # ---------------------------------------------------------------------------
@@ -46,6 +90,7 @@ class SessionRow(Base):
     user_id = Column(Integer, index=True, nullable=False)
     expiry = Column(DateTime, nullable=False)
 
+# Create all tables
 Base.metadata.create_all(bind=engine)
 
 # ---------------------------------------------------------------------------
@@ -118,7 +163,6 @@ def current_user_from_cookie(request: Request, db: Session):
         return None
     return db.get(User, row.user_id)
 
-
 def _cookie_params_for(request: Request) -> dict:
     """Decide cookie security flags based on request scheme and env.
 
@@ -172,14 +216,8 @@ DEFAULT_ACHIEVEMENTS = {
     "badges": [],
 }
 
-
 def _ensure_achievements_shape(ach: dict | str | None) -> dict:
-    """Return a normalized achievements dict ensuring all expected keys exist.
-
-    Handles cases where the JSON is stored as a string, partially missing, or
-    mutated in-place. Also guarantees a fresh copy to avoid accidental shared
-    mutable defaults.
-    """
+    """Return a normalized achievements dict ensuring all expected keys exist."""
     base = deepcopy(DEFAULT_ACHIEVEMENTS)
     data: dict = {}
     if isinstance(ach, str):
@@ -208,13 +246,7 @@ def _ensure_achievements_shape(ach: dict | str | None) -> dict:
 
 # --- Settings normalization ---
 def _ensure_settings_shape(s: dict | str | None) -> dict:
-    """Return a normalized settings dict with proper types and defaults.
-
-    - Coerces booleans for toggles
-    - Canonicalizes tts_voice to 'male' | 'female' | 'App voice'
-    - Clamps speaking_rate to 0.5..1.5 float
-    - Ensures all expected keys exist
-    """
+    """Return a normalized settings dict with proper types and defaults."""
     base = deepcopy(DEFAULT_SETTINGS)
     data: dict = {}
     if isinstance(s, str):
