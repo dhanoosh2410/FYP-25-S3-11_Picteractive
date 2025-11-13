@@ -198,7 +198,11 @@ def _split_sentences(text: str):
 def _detailed_caption_openai(pil: Image.Image, region=None, *, speed: str = "fast") -> dict:
     """
     Returns a ONE-SENTENCE caption (plus derived fields).
-    Uses OpenAI Vision via Chat Completions with strict prompt & post-processing.
+
+    Style:
+    - Always start with: "The image shows"
+    - Natural, child-friendly wording
+    - No need to mention exact counts of objects unless really important
     """
     # Optional crop
     if region:
@@ -217,15 +221,16 @@ def _detailed_caption_openai(pil: Image.Image, region=None, *, speed: str = "fas
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{b64}"
 
-    # Single-sentence, factual, object+count oriented instruction
+    # New style instruction
     instruction = (
-        "Describe this image in EXACTLY ONE clear sentence (under 30 words), "
-        "naming the main objects with numerals for counts (e.g., '3 apples'), "
-        "plus one or two key attributes (e.g., color/material/setting). "
+        "You are writing a simple caption for children.\n"
+        "Describe this image in EXACTLY ONE clear sentence (under 30 words).\n"
+        "The sentence MUST start with the words: 'The image shows'.\n"
+        "Briefly mention the main objects and setting.\n"
+        "Avoid giving exact numbers or counts unless it is very important.\n"
         "Do not hedge or invent details. Output only the sentence."
     )
 
-    # Modest token budget; cooler temperature for factual captions
     max_tokens = 60
     temperature = 0.4
 
@@ -244,7 +249,7 @@ def _detailed_caption_openai(pil: Image.Image, region=None, *, speed: str = "fas
         )
         text = (r.choices[0].message.content or "").strip()
     except Exception as e:
-        if (os.getenv("CAPTION_DEBUG", "").lower() in {"1","true","yes","on"}):
+        if (os.getenv("CAPTION_DEBUG", "").lower() in {"1", "true", "yes", "on"}):
             import sys, traceback
             print(f"[caption] OpenAI error: {type(e).__name__}: {e}", file=sys.stderr)
             traceback.print_exc()
@@ -252,28 +257,38 @@ def _detailed_caption_openai(pil: Image.Image, region=None, *, speed: str = "fas
 
     # Normalize → ONE sentence
     text = re.sub(r"(?i)^\s*description:\s*", "", text).strip()
-    # Split and keep first sentence only
     parts = re.split(r'(?<=[\.!?])\s+', text) if text else []
     one = (parts[0] if parts else "").strip()
-    # If model forgot punctuation, add a period
+
+    # Ensure it starts with "The image shows"
+    if one:
+        if not one.lower().startswith("the image shows"):
+            # avoid double capitalisation weirdness
+            one = one.lstrip()
+            if one and one[0].isupper():
+                # make rest sentence start lower-case to read naturally
+                one = "The image shows " + one[0].lower() + one[1:]
+            else:
+                one = "The image shows " + one
+    else:
+        one = "The image shows a scene that could not be described clearly."
+
+    # Ensure terminal punctuation
     if one and one[-1] not in ".!?":
         one += "."
 
-    # Fallback if empty
-    if not one:
-        one = "A clear, concise description could not be generated."
-
-    # Derive objects from the one-liner
+    # Derive objects (still works if the model occasionally uses numbers)
     objects = _parse_objects_from_text(one)
 
     return {
-        "caption": one,                 # ← your UI reads this
+        "caption": one,
         "sentences": [one],
         "paragraph": one,
         "labels": [],
         "objects": objects,
         "mode": "detailed",
     }
+
 
 
 # ---------- Health / Status ----------
