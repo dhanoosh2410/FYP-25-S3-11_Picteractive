@@ -1859,6 +1859,7 @@ function RegionSelector({ src, onConfirm, onCancel }){
 
 
 function WhatsThisV2(){
+  
   const [imgUrl,setImgUrl]=React.useState("");
   const [imgBlob,setImgBlob]=React.useState(null);
   const [origBlob,setOrigBlob]=React.useState(null); // original file
@@ -1875,7 +1876,7 @@ function WhatsThisV2(){
   const [dictLoading,setDictLoading]=React.useState(false);
   const [dictError,setDictError]=React.useState("");
   const [dictOpen,setDictOpen]=React.useState(false);
-  const fileRef=React.useRef(null), videoRef=React.useRef(null), streamRef=React.useRef(null), audioRef=React.useRef(null);
+  const fileRef=React.useRef(null), videoRef=React.useRef(null), streamRef=React.useRef(null), audioRef=React.useRef(null);const canvasRef = React.useRef(null);
   const navigate=useNavigate(); const { show, Toast } = useToast(); const { refetchMe } = useAuth();
   // Colour-blind controls
   const [cbCond,setCbCond]=React.useState('deuteranomaly');
@@ -1883,13 +1884,66 @@ function WhatsThisV2(){
   const [cbMode,setCbMode]=React.useState('simulate'); // simulate | enhance
   const [cbSplit,setCbSplit]=React.useState(false);
   const [cbPreview,setCbPreview]=React.useState('');
+  
 
   React.useEffect(()=>()=>{ streamRef.current?.getTracks().forEach(t=>t.stop()); },[]);
   function openPicker(){ fileRef.current?.click(); }
   function onFile(e){const f=e.target.files?.[0];if(!f)return;const o=URL.createObjectURL(f);setOrigBlob(f);setOrigUrl(o);setCvdBase(f);setIsCropped(false);setImgBlob(f);setImgUrl(o);stopCamera();doCaption();}
-  async function startCamera(){ try{ streamRef.current?.getTracks?.().forEach(t=>t.stop()); const s=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}}); streamRef.current=s; if(videoRef.current){videoRef.current.setAttribute('playsinline','');videoRef.current.muted=true;videoRef.current.srcObject=s; await videoRef.current.play();} }catch(e){const n=e?.name||'Error';const m=n==='NotReadableError'?'Camera busy in another app':n==='NotFoundError'?'No camera found':n==='NotAllowedError'?'Access blocked by browser/OS':e?.message||'Camera access failed'; show(`${n}: ${m}`);} }
-  function stopCamera(){ streamRef.current?.getTracks().forEach(t=>t.stop()); streamRef.current=null; if(videoRef.current) videoRef.current.srcObject=null; }
-  function captureFrame(){ const v=videoRef.current; if(!v) return; const c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); c.toBlob(b=>{ if(!b) return; setImgBlob(b); setImgUrl(URL.createObjectURL(b)); setOrigBlob(b); setCvdBase(b); setIsCropped(false); stopCamera(); doCaption(); },'image/jpeg',0.92); }
+  
+  
+
+
+// start the camera
+async function startCamera() {
+  // stop any existing stream
+  if (streamRef.current) {
+    streamRef.current.getTracks().forEach(t => t.stop());
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user" }
+    });
+    streamRef.current = stream;
+    videoRef.current.srcObject = stream;
+    await videoRef.current.play(); // start playback
+  } catch (err) {
+    if (err.name === "NotAllowedError") {
+      show("camera permission denied", "error");
+    } else if (err.name === "NotFoundError") {
+      show("no camera found", "error");
+    } else if (err.name === "NotReadableError") {
+      show("camera is busy", "error");
+    } else {
+      show("error starting camera", "error");
+    }
+  }
+}
+
+// stop the camera
+function stopCamera() {
+  if (streamRef.current) {
+    streamRef.current.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    videoRef.current.srcObject = null;
+  }
+}
+
+// capture a frame from the video and create a blob
+async function captureFrame() {
+  const canvas  = canvasRef.current;
+  const video   = videoRef.current;
+  const context = canvas.getContext("2d");
+  // draw current frame onto canvas
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // convert to JPEG blob
+  canvas.toBlob(blob => {
+    setImgBlob(blob);
+    setImgUrl(URL.createObjectURL(blob));
+    stopCamera();
+    doCaption(); // call caption generation
+  }, "image/jpeg", 0.8);
+}
+
 
   async function doCaption(region=null, blobOverride=null){ const blob=blobOverride||imgBlob; if(!blob){ show('Please upload or capture an image first'); return; } closeDictionary(); setLoading(true); setCaption(''); setFocusIndex(-1); try{ const text=await apiCaption(blob, region); const clean=String(text||'').trim(); const out = clean && clean.toLowerCase()!=='none'? clean : ''; setCaption(out); if(out) originalCaptionRef.current = out; if(out){ await apiAchEvent('caption'); await refetchMe().catch(()=>{}); } if(region) setIsCropped(true);} catch(e){ show(e.message||'Caption failed'); } finally{ setLoading(false);} }  async function speak(){ const t=caption.trim(); if(!t) return; try{ const gs=(typeof window!=='undefined'?(window.__picteractive_settings||{}):{}); const src=await apiTTS(t,{ voice: gs.tts_voice, rate: gs.speaking_rate }); const a=audioRef.current; if(!a) return; a.src=src; const words=t.split(/(\s+)/); const onReady=()=>{ a.play().catch(()=>{}); const step=a.duration>0&&words.length? a.duration/words.length:0.35; let i=0; const timer=setInterval(()=>{ if(i>=words.length){ clearInterval(timer); setFocusIndex(-1); return;} if(/\w/.test(words[i])) setFocusIndex(i); i++; }, step*1000); a.addEventListener('ended',()=>{ clearInterval(timer); setFocusIndex(-1); }, { once:true }); }; a.addEventListener('canplaythrough', onReady, { once:true }); } catch { show('TTS failed'); } }
   function clearAll(){ setImgUrl(""); setImgBlob(null); setOrigBlob(null); setCvdBase(null); setIsCropped(false); setCaption(""); stopCamera(); setFocusIndex(-1); closeDictionary(); }
@@ -2004,80 +2058,157 @@ async function doTranslate(langCode){
     }
   }
 
-  return (
-    <div className="min-h-screen" style={{ background:'var(--forest)' }}>
+    return (
+    <div className="min-h-screen" style={{ background: 'var(--forest)' }}>
       <NavBar />
       <div className="wt-wrap">
         <div className="wt-title">IMAGE DESCRIPTION GENERATION</div>
+
         <div className="wt-row">
           <div className="wt-card">
             {!hasImage && (
               <div className="wt-actions">
-                <button className="btn-orange" onClick={openPicker}><img src={uploadIcon} alt="Upload" width="22" height="22"/> UPLOAD IMAGE</button>
-                <input ref={fileRef} type="file" accept="image/*" style={{display:'none'}} onChange={onFile}/>
-                <button className="btn-orange" onClick={startCamera}><img src={cameraIcon} alt="Camera" width="22" height="22"/> TAKE A PHOTO</button>
+                <button className="btn-orange" onClick={openPicker}>
+                  <img src={uploadIcon} alt="Upload" width="22" height="22" /> UPLOAD IMAGE
+                </button>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={onFile}
+                />
+                <button className="btn-orange" onClick={startCamera}>
+                  <img src={cameraIcon} alt="Camera" width="22" height="22" /> TAKE A PHOTO
+                </button>
               </div>
             )}
+
             {hasImage && (
               <div>
-                <div className="wt-stage">{imgUrl? (
-                  <div style={{position:'relative',width:'100%',height:'100%'}}>
-                    {!cbSplit ? (<img src={imgUrl} alt="preview" style={{width:'100%',height:'100%',objectFit:'contain'}}/>) : (
-                      <>
-                      {/* LEFT = original always */}
-                      <img src={origUrl || imgUrl} alt="original" style={{width:'100%',height:'100%',objectFit:'contain'}}/>
-                      {/* RIGHT = filtered preview */}
-                      <img src={cbPreview || origUrl || imgUrl} alt="cvd"
-                      style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'contain',clipPath:'inset(0 0 0 50%)'}}/>
-                      </>)}
-                      </div>
-                ) : <video ref={videoRef}autoPlay muted playsInline />}</div>
+                <div className="wt-stage">
+                  {/* Hidden canvas used only for capturing camera frames */}
+                  <canvas
+                    ref={canvasRef}
+                    width={640}
+                    height={480}
+                    style={{ display: 'none' }}
+                  />
+
+                  {imgUrl ? (
+                    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+                      {!cbSplit ? (
+                        <img
+                          src={imgUrl}
+                          alt="preview"
+                          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        />
+                      ) : (
+                        <>
+                          {/* LEFT = original always */}
+                          <img
+                            src={origUrl || imgUrl}
+                            alt="original"
+                            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                          />
+                          {/* RIGHT = filtered preview */}
+                          <img
+                            src={cbPreview || origUrl || imgUrl}
+                            alt="cvd"
+                            style={{
+                              position: 'absolute',
+                              inset: 0,
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'contain',
+                              clipPath: 'inset(0 0 0 50%)',
+                            }}
+                          />
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <video ref={videoRef} autoPlay muted playsInline />
+                  )}
+                </div>
+
                 {streamRef.current && (
                   <div className="mt-3 grid place-items-center">
-                    <button className="btn-orange" onClick={captureFrame}>SNAP</button>
-                    <button className="btn btn-plain mt-2" onClick={stopCamera}>Close Camera</button>
+                    <button className="btn-orange" onClick={captureFrame}>
+                      SNAP
+                    </button>
+                    <button className="btn btn-plain mt-2" onClick={stopCamera}>
+                      Close Camera
+                    </button>
                   </div>
                 )}
-                {isCropped && (<div className="mt-2 text-center"><button className="btn btn-plain" onClick={revertCrop}>Revert to original</button></div>)}
+
+                {isCropped && (
+                  <div className="mt-2 text-center">
+                    <button className="btn btn-plain" onClick={revertCrop}>
+                      Revert to original
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
-       
+
+        {/* Generate description button(s) */}
         {!hasImage && (
           <>
-          <div className="wt-readout" style={{marginTop:12}}>ADD IMAGE TO GENERATE DESCRIPTION</div>
-          <div className="wt-generate" style={{marginTop:16}}>
-            <button className="btn-orange" onClick={()=>doCaption()} disabled={!imgBlob || loading}>
-              <img src={sparklesIcon} alt="Generate" width="22" height="22"/> {loading? 'GENERATING...' : 'GENERATE DESCRIPTION'}
+            <div className="wt-readout" style={{ marginTop: 12 }}>
+              ADD IMAGE TO GENERATE DESCRIPTION
+            </div>
+            <div className="wt-generate" style={{ marginTop: 16 }}>
+              <button
+                className="btn-orange"
+                onClick={() => doCaption()}
+                disabled={!imgBlob || loading}
+              >
+                <img src={sparklesIcon} alt="Generate" width="22" height="22" />{' '}
+                {loading ? 'GENERATING...' : 'GENERATE DESCRIPTION'}
               </button>
-              </div>
-              </>
-            )}
+            </div>
+          </>
+        )}
 
-            {hasImage && (
-              <div className="wt-generate" style={{marginTop:16}}>
-                <button className="btn-orange" onClick={()=>doCaption()} disabled={!imgBlob || loading}>
-                  <img src={sparklesIcon} alt="Generate" width="22" height="22"/> {loading? 'GENERATING...' : 'GENERATE DESCRIPTION'}
-                  </button>
-                  </div>
-                )}
+        {hasImage && (
+          <div className="wt-generate" style={{ marginTop: 16 }}>
+            <button
+              className="btn-orange"
+              onClick={() => doCaption()}
+              disabled={!imgBlob || loading}
+            >
+              <img src={sparklesIcon} alt="Generate" width="22" height="22" />{' '}
+              {loading ? 'GENERATING...' : 'GENERATE DESCRIPTION'}
+            </button>
+          </div>
+        )}
 
+        {/* Caption output with clickable words (dictionary) */}
         {!!caption && (
           <div className="wt-readout">
-            {words.map((w,i)=>{
-              const trimmed = w.replace(/^[^A-Za-z0-9']+|[^A-Za-z0-9']+$/g,"");
+            {words.map((w, i) => {
+              const trimmed = w.replace(/^[^A-Za-z0-9']+|[^A-Za-z0-9']+$/g, '');
               const clickable = Boolean(trimmed);
-              const handleClick = ()=> clickable && openDictionary(trimmed);
-              const handleKey = (ev)=>{ if(!clickable) return; if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); openDictionary(trimmed); } };
+              const handleClick = () => clickable && openDictionary(trimmed);
+              const handleKey = (ev) => {
+                if (!clickable) return;
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault();
+                  openDictionary(trimmed);
+                }
+              };
               return (
                 <span
                   key={i}
-                  className={cx('word', clickable && 'clickable', i===focusIndex && 'focus')}
+                  className={cx('word', clickable && 'clickable', i === focusIndex && 'focus')}
                   onClick={handleClick}
                   onKeyDown={handleKey}
-                  role={clickable? 'button': undefined}
-                  tabIndex={clickable? 0: undefined}
+                  role={clickable ? 'button' : undefined}
+                  tabIndex={clickable ? 0 : undefined}
                 >
                   {w}
                 </span>
@@ -2085,48 +2216,84 @@ async function doTranslate(langCode){
             })}
           </div>
         )}
+
+        {/* Tools row: Region select, translate, TTS, clear */}
         {captionReady && (
           <div className="wt-tools">
-            <button className="wt-tool-btn" onClick={()=> imgUrl && setRegionOpen(true)}>
-              <img src={cropIcon} alt="Crop" width="22" height="22"/> REGION SELECT
+            <button className="wt-tool-btn" onClick={() => imgUrl && setRegionOpen(true)}>
+              <img src={cropIcon} alt="Crop" width="22" height="22" /> REGION SELECT
             </button>
-            {/* NEW: Translate controls */}
-            <div className="wt-translate" style={{ position: 'relative', display: 'inline-block' }}>
-              <button
-              className="wt-tool-btn"
-              onClick={() => setDropdownOpen(!dropdownOpen)}
-              onBlur={() => setTimeout(() => setDropdownOpen(false), 180)} 
-              disabled={!captionReady || translating}
-              aria-haspopup="menu"
-              aria-expanded={dropdownOpen}
+
+            {/* Translate controls with dropdown */}
+            <div
+              className="wt-translate"
+              style={{ position: 'relative', display: 'inline-block' }}
             >
-              <img src={translateIcon} alt="Translate" className="wt-icon" />
-              <span>{translating ? 'TRANSLATING…' : 'TRANSLATE'}</span>
-              {!translating && <span aria-hidden> ▾</span>}
+              <button
+                className="wt-tool-btn"
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                onBlur={() => setTimeout(() => setDropdownOpen(false), 180)}
+                disabled={!captionReady || translating}
+                aria-haspopup="menu"
+                aria-expanded={dropdownOpen}
+              >
+                <img src={translateIcon} alt="Translate" className="wt-icon" />
+                <span>{translating ? 'TRANSLATING…' : 'TRANSLATE'}</span>
               </button>
+
               {dropdownOpen && (
-                <div className="wt-dropdown" role="menu">
-                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('en')}>English</button>
-                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('zh')}>Mandarin (中文)</button>
-                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('ms')}>Malay (Bahasa Melayu)</button>
-                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('ta')}>Tamil (தமிழ்)</button>
+                <div className="wt-translate-menu" role="menu">
+                  <button type="button" onClick={() => doTranslate('en')}>
+                    English (original)
+                  </button>
+                  <button type="button" onClick={() => doTranslate('zh')}>
+                    Chinese (中文)
+                  </button>
+                  <button type="button" onClick={() => doTranslate('ms')}>
+                    Malay (Bahasa Melayu)
+                  </button>
+                  <button type="button" onClick={() => doTranslate('ta')}>
+                    Tamil (தமிழ்)
+                  </button>
                 </div>
-               )}
-             </div>
+              )}
+            </div>
+
             <button className="wt-tool-btn" onClick={speak} disabled={!captionReady}>
-              <img src={speakIcon} alt="Speak" width="22" height="22"/> TEXT-TO-SPEECH
+              <img src={speakIcon} alt="Speak" width="22" height="22" /> TEXT-TO-SPEECH
             </button>
+
             <button className="wt-tool-btn" onClick={clearAll}>
-              <img src={trashIcon} alt="Clear" width="22" height="22"/> CLEAR
+              <img src={trashIcon} alt="Clear" width="22" height="22" /> CLEAR
             </button>
           </div>
         )}
+
+        {/* Colour-blindness settings */}
         {captionReady && (
-          <div style={{ background:'#fff', borderRadius:24, padding:18, marginTop:18, boxShadow:'0 2px 0 rgba(0,0,0,.15)' }}>
-            <div className="text-center text-slate-800" style={{fontWeight:800, marginBottom:10, textTransform:'uppercase'}}>COLOUR BLINDNESS SETTINGS</div>
-            <div style={{display:'grid', gap:12}}>
-              <label style={{display:'grid', gap:6}}><span className="text-sm font-semibold">Condition</span>
-                <select value={cbCond} onChange={e=>setCbCond(e.target.value)}>
+          <div
+            style={{
+              background: '#fff',
+              borderRadius: 24,
+              padding: 18,
+              marginTop: 18,
+              boxShadow: '0 2px 0 rgba(0,0,0,0.15)',
+            }}
+          >
+            <div
+              className="text-center text-slate-800"
+              style={{
+                fontWeight: 800,
+                marginBottom: 10,
+                textTransform: 'uppercase',
+              }}
+            >
+              COLOUR BLINDNESS SETTINGS
+            </div>
+            <div style={{ display: 'grid', gap: 12 }}>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span className="text-sm font-semibold">Condition</span>
+                <select value={cbCond} onChange={(e) => setCbCond(e.target.value)}>
                   <optgroup label="Red–Green deficiencies">
                     <option value="protanomaly">Protanomaly (red-weak)</option>
                     <option value="protanopia">Protanopia (red-blind)</option>
@@ -2144,25 +2311,133 @@ async function doTranslate(langCode){
                   </optgroup>
                 </select>
               </label>
-              <label style={{display:'grid', gap:6}}><span className="text-sm font-semibold">Severity (mild → full)</span>
-                <input type="range" min="0" max="100" step="1" value={cbSeverity} onChange={e=>setCbSeverity(Number(e.target.value))}/>
+
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span className="text-sm font-semibold">Severity (mild → full)</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={cbSeverity}
+                  onChange={(e) => setCbSeverity(Number(e.target.value))}
+                />
               </label>
-              <div style={{display:'flex', gap:16, alignItems:'center'}}><span className="text-sm font-semibold">Mode</span>
-                <label><input type="radio" name="cbmode" checked={cbMode==='simulate'} onChange={()=>setCbMode('simulate')}/> Simulate</label>
-                <label style={{marginLeft:10}}><input type="radio" name="cbmode" checked={cbMode==='enhance'} onChange={()=>setCbMode('enhance')}/> Enhance</label>
-                <label style={{marginLeft:16}}><input type="checkbox" checked={cbSplit} onChange={e=>setCbSplit(e.target.checked)}/> Split view</label>
+
+              <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+                <span className="text-sm font-semibold">Mode</span>
+                <label>
+                  <input
+                    type="radio"
+                    name="cbmode"
+                    checked={cbMode === 'simulate'}
+                    onChange={() => setCbMode('simulate')}
+                  />{' '}
+                  Simulate
+                </label>
+                <label style={{ marginLeft: 10 }}>
+                  <input
+                    type="radio"
+                    name="cbmode"
+                    checked={cbMode === 'enhance'}
+                    onChange={() => setCbMode('enhance')}
+                  />{' '}
+                  Enhance
+                </label>
+                <label style={{ marginLeft: 16 }}>
+                  <input
+                    type="checkbox"
+                    checked={cbSplit}
+                    onChange={(e) => setCbSplit(e.target.checked)}
+                  />{' '}
+                  Split view
+                </label>
               </div>
             </div>
-            <div className="mt-3" style={{display:'flex', gap:12, justifyContent:'center'}}>
-              <button className="btn-orange" onClick={handleReset}>RESET</button>
-              <button className="btn-orange" onClick={applyCVD}>APPLY CHANGES</button>
+
+            <div
+              className="mt-3"
+              style={{ display: 'flex', gap: 12, justifyContent: 'center' }}
+            >
+              <button className="btn-orange" onClick={handleReset}>
+                RESET
+              </button>
+              <button className="btn-orange" onClick={applyCVD}>
+                APPLY CHANGES
+              </button>
             </div>
           </div>
         )}
-        {captionReady && (<div className="wt-test-row" style={{marginTop:24, marginBottom:8}}> <button className="wt-test-btn" onClick={()=>navigate('/quiz',{ state:{ caption, imageUrl: imgUrl } })}><span className="wt-test-icon">?</span>TEST YOURSELF!</button></div>)}
+
+        {/* Quiz button */}
+        {captionReady && (
+          <div
+            className="wt-test-row"
+            style={{ marginTop: 24, marginBottom: 8 }}
+          >
+            <button
+              className="wt-test-btn"
+              onClick={() =>
+                navigate('/quiz', { state: { caption, imageUrl: imgUrl } })
+              }
+            >
+              <span className="wt-test-icon">?</span>TEST YOURSELF!
+            </button>
+          </div>
+        )}
+
+        {/* Audio + region selector + dictionary + toast */}
         <audio ref={audioRef} hidden />
-        {regionOpen && imgUrl && (<RegionSelector src={imgUrl} onCancel={()=>setRegionOpen(false)} onConfirm={async (box)=>{ setRegionOpen(false); try{ const cropped=await new Promise(res=>{ const im=new Image(); im.onload=()=>{ const c=document.createElement('canvas'); c.width=box.w; c.height=box.h; const x=c.getContext('2d'); x.drawImage(im, box.x, box.y, box.w, box.h, 0,0, box.w, box.h); c.toBlob(b=>res(b),'image/jpeg',0.92); }; im.src=imgUrl; }); if(cropped){ setImgBlob(cropped); setImgUrl(URL.createObjectURL(cropped)); setCvdBase(cropped); setIsCropped(true);} }catch{} await doCaption(null); }}/>) }
-        <DictionaryModal word={dictOpen ? dictWord : ''} data={dictData} loading={dictLoading} error={dictError} onClose={closeDictionary} />
+
+        {regionOpen && imgUrl && (
+          <RegionSelector
+            src={imgUrl}
+            onCancel={() => setRegionOpen(false)}
+            onConfirm={async (box) => {
+              setRegionOpen(false);
+              try {
+                const cropped = await new Promise((res) => {
+                  const im = new Image();
+                  im.onload = () => {
+                    const c = document.createElement('canvas');
+                    c.width = box.w;
+                    c.height = box.h;
+                    const x = c.getContext('2d');
+                    x.drawImage(
+                      im,
+                      box.x,
+                      box.y,
+                      box.w,
+                      box.h,
+                      0,
+                      0,
+                      box.w,
+                      box.h
+                    );
+                    c.toBlob((b) => res(b), 'image/jpeg', 0.92);
+                  };
+                  im.src = imgUrl;
+                });
+                if (cropped) {
+                  setImgBlob(cropped);
+                  setImgUrl(URL.createObjectURL(cropped));
+                  setCvdBase(cropped);
+                  setIsCropped(true);
+                }
+              } catch {}
+              await doCaption(null);
+            }}
+          />
+        )}
+
+        <DictionaryModal
+          word={dictOpen ? dictWord : ''}
+          data={dictData}
+          loading={dictLoading}
+          error={dictError}
+          onClose={closeDictionary}
+        />
+
         <Toast />
       </div>
     </div>
