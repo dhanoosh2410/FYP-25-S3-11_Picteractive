@@ -1902,44 +1902,54 @@ async function startCamera() {
   try {
     // reset caption + image state
     setCaption("");
-    setWords([]);
-    setCaptionReady(false);
     setImgUrl("");
     setOrigUrl("");
     setCbPreview("");
     setImgBlob(null);
     setCvdBase(null);
     setIsCropped(false);
+    setFocusIndex(-1);
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      toast.show("Camera is not supported in this browser.");
-      setCameraOn(false);
-      return;
-    }
-
-    // stop any previous stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-
-    // get new stream
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" }, // front camera on mobile
-    });
-
-    // store the stream, THEN turn cameraOn on
-    streamRef.current = stream;
-    setCameraOn(true);
-  } catch (err) {
-    console.error("camera error", err);
-    toast.show(
-      err.name === "NotAllowedError"
-        ? "Camera permission was blocked."
-        : "Failed to start camera."
-    );
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    show("Camera is not supported in this browser.");
     setCameraOn(false);
+    return;
   }
+
+  // stop any previous stream
+  if (streamRef.current) {
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }
+
+  // request camera
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user" }, // or { ideal: "environment" } to prefer back camera
+    audio: false,
+  });
+
+  // store the stream, hook to <video>, then turn camera on
+  streamRef.current = stream;
+
+  if (videoRef.current) {
+    videoRef.current.srcObject = stream;
+    try { await videoRef.current.play(); } catch {}
+  }
+
+  setCameraOn(true);
+} catch (err) {
+  console.error("camera error", err);
+  show(
+    err && err.name === "NotAllowedError"
+      ? "Camera permission was blocked."
+      : "Failed to start camera."
+  );
+  setCameraOn(false);
+  if (streamRef.current) {
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }
+}
 }
 
 
