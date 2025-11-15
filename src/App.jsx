@@ -1395,15 +1395,24 @@ function StoryPage(){
   const flatWords = React.useMemo(() => segWords.flat(), [segWords]);
 
   async function speakStory() {
-  const fullText = [title, ...panels].filter(Boolean).join(" ").trim();
-  if (!fullText) return;
+    const fullText = [title, ...panels].filter(Boolean).join(" ").trim();
+    if (!fullText) return;
+  
+    try {
+      const gs = (typeof window !== 'undefined' ? (window.__picteractive_settings||{}) : {});
+      const src = await apiTTS(fullText, { voice: gs.tts_voice, rate: gs.speaking_rate });
+  
+      const a = ttsRef.current;
+      if (!a) return;
 
-  try {
-    const gs = (typeof window !== 'undefined' ? (window.__picteractive_settings||{}) : {});
-    const src = await apiTTS(fullText, { voice: gs.tts_voice, rate: gs.speaking_rate });
-
-    const a = ttsRef.current;
-    if (!a) return;
+      // Apply speaking rate from settings (0.5x / 1.0x / 1.5x).
+      const rate = (() => {
+        const rv = gs && typeof gs.speaking_rate !== 'undefined' ? gs.speaking_rate : 1.0;
+        if (typeof rv === 'number' && isFinite(rv) && rv > 0) return rv;
+        const n = Number(rv);
+        return isFinite(n) && n > 0 ? n : 1.0;
+      })();
+      a.playbackRate = rate;
 
     // Clean up any previous listeners to avoid stacking
     const clean = () => {
@@ -1435,24 +1444,24 @@ function StoryPage(){
       }
     };
 
-    const onMeta = () => {
-      // Start playback once we have metadata/buffer
-      a.play().catch(() => {});
-    };
+      const onMeta = () => {
+        // Start playback once we have metadata/buffer
+        a.play().catch(() => {});
+      };
 
-    // Wire events before setting src
-    a.addEventListener("timeupdate", onTime);
-    a.addEventListener("ended", onEnd);
-    a.addEventListener("loadedmetadata", onMeta, { once: true });
-    a.addEventListener("canplaythrough", onMeta, { once: true });
-
-    // Kick off playback
-    a.src = src;
-    // Some browsers need an explicit load
-    try { a.load(); } catch {}
-  } catch {
-    show("TTS failed");
-  }
+      // Wire events before setting src
+      a.addEventListener("timeupdate", onTime);
+      a.addEventListener("ended", onEnd);
+      a.addEventListener("loadedmetadata", onMeta, { once: true });
+      a.addEventListener("canplaythrough", onMeta, { once: true });
+  
+      // Kick off playback
+      a.src = src;
+      // Some browsers need an explicit load
+      try { a.load(); } catch {}
+    } catch {
+      show("TTS failed");
+    }
   }
 
 
@@ -1995,7 +2004,7 @@ async function startCamera() {
 }
 
 
-  async function doCaption(region=null, blobOverride=null){ const blob=blobOverride||imgBlob; if(!blob){ show('Please upload or capture an image first'); return; } closeDictionary(); setLoading(true); setCaption(''); setFocusIndex(-1); try{ const text=await apiCaption(blob, region); const clean=String(text||'').trim(); const out = clean && clean.toLowerCase()!=='none'? clean : ''; setCaption(out); if(out) originalCaptionRef.current = out; if(out){ await apiAchEvent('caption'); await refetchMe().catch(()=>{}); } if(region) setIsCropped(true);} catch(e){ show(e.message||'Caption failed'); } finally{ setLoading(false);} }  async function speak(){ const t=caption.trim(); if(!t) return; try{ const gs=(typeof window!=='undefined'?(window.__picteractive_settings||{}):{}); const src=await apiTTS(t,{ voice: gs.tts_voice, rate: gs.speaking_rate }); const a=audioRef.current; if(!a) return; a.src=src; const words=t.split(/(\s+)/); const onReady=()=>{ a.play().catch(()=>{}); const step=a.duration>0&&words.length? a.duration/words.length:0.35; let i=0; const timer=setInterval(()=>{ if(i>=words.length){ clearInterval(timer); setFocusIndex(-1); return;} if(/\w/.test(words[i])) setFocusIndex(i); i++; }, step*1000); a.addEventListener('ended',()=>{ clearInterval(timer); setFocusIndex(-1); }, { once:true }); }; a.addEventListener('canplaythrough', onReady, { once:true }); } catch { show('TTS failed'); } }
+  async function doCaption(region=null, blobOverride=null){ const blob=blobOverride||imgBlob; if(!blob){ show('Please upload or capture an image first'); return; } closeDictionary(); setLoading(true); setCaption(''); setFocusIndex(-1); try{ const text=await apiCaption(blob, region); const clean=String(text||'').trim(); const out = clean && clean.toLowerCase()!=='none'? clean : ''; setCaption(out); if(out) originalCaptionRef.current = out; if(out){ await apiAchEvent('caption'); await refetchMe().catch(()=>{}); } if(region) setIsCropped(true);} catch(e){ show(e.message||'Caption failed'); } finally{ setLoading(false);} }  async function speak(){ const t=caption.trim(); if(!t) return; try{ const gs=(typeof window!=='undefined'?(window.__picteractive_settings||{}):{}); const src=await apiTTS(t,{ voice: gs.tts_voice, rate: gs.speaking_rate }); const a=audioRef.current; if(!a) return; const rate=(()=>{ const rv=gs&&typeof gs.speaking_rate!=='undefined'? gs.speaking_rate:1.0; if(typeof rv==='number'&&isFinite(rv)&&rv>0) return rv; const n=Number(rv); return isFinite(n)&&n>0?n:1.0; })(); a.playbackRate=rate; a.src=src; const words=t.split(/(\s+)/); const onReady=()=>{ a.play().catch(()=>{}); const step=a.duration>0&&words.length? a.duration/words.length:0.35; let i=0; const timer=setInterval(()=>{ if(i>=words.length){ clearInterval(timer); setFocusIndex(-1); return;} if(/\\w/.test(words[i])) setFocusIndex(i); i++; }, step*1000); a.addEventListener('ended',()=>{ clearInterval(timer); setFocusIndex(-1); }, { once:true }); }; a.addEventListener('canplaythrough', onReady, { once:true }); } catch { show('TTS failed'); } }
   function clearAll(){ setImgUrl(""); setImgBlob(null); setOrigBlob(null); setCvdBase(null); setIsCropped(false); setCaption(""); stopCamera(); setFocusIndex(-1); closeDictionary(); }
   function revertCrop(){ if(origBlob){ setImgBlob(origBlob); setImgUrl(URL.createObjectURL(origBlob)); setCvdBase(origBlob); setIsCropped(false); } }
 
@@ -2124,7 +2133,6 @@ async function doTranslate(langCode){
       <NavBar />
       <div className="wt-wrap">
         <div className="wt-title">IMAGE DESCRIPTION GENERATION</div>
-
         <div className="wt-row">
           <div className="wt-card">
             {!hasImage && (
@@ -2286,10 +2294,7 @@ async function doTranslate(langCode){
             </button>
 
             {/* Translate controls with dropdown */}
-            <div
-              className="wt-translate"
-              style={{ position: 'relative', display: 'inline-block' }}
-            >
+            <div className="wt-translate" style={{ position: 'relative', display: 'inline-block' }}>
               <button
                 className="wt-tool-btn"
                 onClick={() => setDropdownOpen(!dropdownOpen)}
@@ -2300,26 +2305,18 @@ async function doTranslate(langCode){
               >
                 <img src={translateIcon} alt="Translate" className="wt-icon" />
                 <span>{translating ? 'TRANSLATING…' : 'TRANSLATE'}</span>
+                {!translating && <span aria-hidden> ▾</span>}
               </button>
 
               {dropdownOpen && (
-                <div className="wt-translate-menu" role="menu">
-                  <button type="button" onClick={() => doTranslate('en')}>
-                    English (original)
-                  </button>
-                  <button type="button" onClick={() => doTranslate('zh')}>
-                    Chinese (中文)
-                  </button>
-                  <button type="button" onClick={() => doTranslate('ms')}>
-                    Malay (Bahasa Melayu)
-                  </button>
-                  <button type="button" onClick={() => doTranslate('ta')}>
-                    Tamil (தமிழ்)
-                  </button>
+                <div className="wt-dropdown" role="menu">
+                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('en')}>English</button>
+                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('zh')}>Mandarin (中文)</button>
+                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('ms')}>Malay (Bahasa Melayu)</button>
+                  <button className="wt-dropdown-item" onMouseDown={() => doTranslate('ta')}>Tamil (தமிழ்)</button>
                 </div>
-              )}
+               )}
             </div>
-
             <button className="wt-tool-btn" onClick={speak} disabled={!captionReady}>
               <img src={speakIcon} alt="Speak" width="22" height="22" /> TEXT-TO-SPEECH
             </button>
