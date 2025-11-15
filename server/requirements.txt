@@ -1,27 +1,37 @@
-# FastAPI & server
 fastapi>=0.110,<1
 uvicorn[standard]>=0.22,<1
-python-multipart>=0.0.9,<1
-
-# Core utils
 pillow>=10,<12
-numpy>=1.26,<3
-tqdm>=4.66,<5
 python-dotenv>=1.0,<2
-httpx>=0.27,<1
-openai>=1.0,<2
+pydantic>=2,<3
+numpy>=2,<3
+pyttsx3>=2.90,<3
+nltk>=3.8,<4
+pywin32; platform_system == "Windows"
+python-multipart>=0.0.9,<1
+tqdm>=4.66,<5
+scikit-image>=0.24,<1
+
+# Offline image captioning (BLIP base)
+transformers>=4.41,<5
+timm>=0.9,<1.1
+accelerate>=0.27,<1
+safetensors>=0.4,<1
+torch>=2.2
+torchvision>=0.17,<1
 colorspacious>=1.1,<2
 
-# TTS + Dictionary
-pyttsx3>=2.90,<3           # current code uses this
-nltk>=3.8,<4               # WordNet support:contentReference[oaicite:4]{index=4}
-# alternative TTS (optional):
-gtts>=2.3.1,<3             # use instead of pyttsx3 if espeak isn’t available
-pydub>=0.25,<1            # required to convert mp3 to wav if using gTTS
-
-# Translate
-deep-translator>=1.11,<2
-
-# Auth/DB
+# Auth + DB
 SQLAlchemy>=2.0,<3
 psycopg2-binary>=2.9,<3
+#python-jose[cryptography]>=3.3,<4
+#passlib[bcrypt]>=1.7,<2
+open_clip_torch>=2.24.0
+
+# Translation (for What's This page)
+deep-translator>=1.11,<2
+
+# Networking floor to avoid old transitive deps
+httpx>=0.27,<1
+
+# Optional object detection (YOLOv8n); falls back to DETR if unavailable
+ultralytics>=8.0,<9
