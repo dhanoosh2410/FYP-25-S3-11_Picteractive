@@ -1,37 +1,24 @@
+# FastAPI & server
 fastapi>=0.110,<1
 uvicorn[standard]>=0.22,<1
-pillow>=10,<12
-python-dotenv>=1.0,<2
-pydantic>=2,<3
-numpy>=2,<3
-pyttsx3>=2.90,<3
-nltk>=3.8,<4
-pywin32; platform_system == "Windows"
 python-multipart>=0.0.9,<1
-tqdm>=4.66,<5
-scikit-image>=0.24,<1
 
-# Offline image captioning (BLIP base)
-transformers>=4.41,<5
-timm>=0.9,<1.1
-accelerate>=0.27,<1
-safetensors>=0.4,<1
-torch>=2.2
-torchvision>=0.17,<1
+# Core utils
+pillow>=10,<12
+numpy>=1.26,<3
+tqdm>=4.66,<5
+python-dotenv>=1.0,<2
+httpx>=0.27,<1
+openai>=1.0,<2
 colorspacious>=1.1,<2
 
-# Auth + DB
-SQLAlchemy>=2.0,<3
-psycopg2-binary>=2.9,<3
-#python-jose[cryptography]>=3.3,<4
-#passlib[bcrypt]>=1.7,<2
-open_clip_torch>=2.24.0
+# TTS + Dictionary
+nltk>=3.8,<4               # optional WordNet support for local dev
+gtts>=2.3.1,<3             # TTS (no OS-level engine needed)
 
-# Translation (for What's This page)
+# Translate
 deep-translator>=1.11,<2
 
-# Networking floor to avoid old transitive deps
-httpx>=0.27,<1
-
-# Optional object detection (YOLOv8n); falls back to DETR if unavailable
-ultralytics>=8.0,<9
+# Auth/DB
+SQLAlchemy>=2.0,<3
+psycopg2-binary>=2.9,<3
