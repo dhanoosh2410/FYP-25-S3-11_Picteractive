@@ -619,7 +619,7 @@ def api_translate(payload: TranslateIn):
 class TTSIn(BaseModel):
     text: str
     voice: Optional[str] = None  # 'male' | 'female' | None
-    rate: Optional[float] = None  # speaking speed hint
+    rate: Optional[float] = None  # speaking speed hint (handled on frontend)
 
 
 @app.post("/api/tts")
@@ -635,18 +635,20 @@ async def tts(payload: TTSIn):
         return JSONResponse(content={"error": "empty_text"}, status_code=400)
 
     try:
-        # gTTS only exposes a boolean speed flag. Map the numeric
-        # rate from the UI into slow/normal in a forgiving way.
-        slow = False
-        if isinstance(payload.rate, (int, float)):
-            try:
-                r = float(payload.rate)
-                if r < 0.9:
-                    slow = True
-            except Exception:
-                slow = False
+        # Map simple male/female choices to slightly different
+        # English variants via TLD. This is not a true gender
+        # switch but gives users an audible difference.
+        vp = (payload.voice or "").strip().lower()
+        if vp == "male":
+            tld = "co.uk"
+        elif vp == "female":
+            tld = "com"
+        else:
+            tld = "com"
 
-        tts_obj = gTTS(text=text, lang="en", slow=slow)
+        # Always generate at normal speed; the frontend controls
+        # playbackRate (0.5x / 1.0x / 1.5x).
+        tts_obj = gTTS(text=text, lang="en", tld=tld, slow=False)
         buf = io.BytesIO()
         tts_obj.write_to_fp(buf)
         buf.seek(0)
