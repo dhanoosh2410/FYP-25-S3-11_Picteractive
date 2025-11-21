@@ -638,13 +638,15 @@ async def tts(payload: TTSIn):
         # Map simple male/female choices to slightly different
         # English variants via TLD. This is not a true gender
         # switch but gives users an audible difference.
+        # Map simple male/female choices to different TLDs (accent proxy)
         vp = (payload.voice or "").strip().lower()
         if vp == "male":
-            tld = "co.uk"
-        elif vp == "female":
-            tld = "com"
+            tld = "co.uk"   # UK English (used for the “Male” option)
         else:
-            tld = "com"
+            # Treat anything else (including "female" and "app voice")
+            # as the same female/default voice.
+            tld = "us"      # US English – shared by App voice and Female
+
 
         # Always generate at normal speed; the frontend controls
         # playbackRate (0.5x / 1.0x / 1.5x).
