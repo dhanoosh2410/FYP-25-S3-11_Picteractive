@@ -157,35 +157,40 @@ export const useAuth = () => useContext(AuthCtx);
 function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
-  
-  useEffect(() => {
-    if (user?.settings) {
-      applyAccessibility(user.settings);
-    }
-  }, [user]);
 
+  // Seed accessibility BEFORE we show children
   useEffect(() => {
-    fetch(`${API}/api/auth/me`, { credentials: "include" })
-      .then(r => r.ok ? r.json() : null)
-      .then(setUser)
-      .finally(() => setReady(true));
+    (async () => {
+      try {
+        const me = await fetch(`${API}/api/auth/me`, { credentials: "include" })
+          .then(r => (r.ok ? r.json() : null));
+        if (me?.settings) applyAccessibility(me.settings);
+        setUser(me);
+      } finally {
+        setReady(true);
+      }
+    })();
   }, []);
 
-  const value = useMemo(() => ({
-    user,
-    refetchMe: () =>
-      fetch(`${API}/api/auth/me`, { credentials: "include" })
-        .then(r => r.ok ? r.json() : null)
-        .then(setUser),
-    logout: async () => {
-      await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
-      setUser(null);
-    }
-  }), [user]);
+  const value = useMemo(
+    () => ({
+      user,
+      refetchMe: () =>
+        fetch(`${API}/api/auth/me`, { credentials: "include" })
+          .then(r => (r.ok ? r.json() : null))
+          .then(setUser),
+      logout: async () => {
+        await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
+        setUser(null);
+      },
+    }),
+    [user]
+  );
 
-  if (!ready) return null; // or a small loader
+  if (!ready) return null; // or a tiny loader/spinner
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
+
 
 // ======= PROTECTED ROUTE =======
 function ProtectedRoute({ children }) {
@@ -570,30 +575,156 @@ async function apiTranslate(text, lang /* 'zh' | 'ms' | 'ta' */){
 
 
 async function apiDict(word){ const r=await fetch(`${API}/api/dictionary?word=${encodeURIComponent(word)}`); const d=await r.json().catch(()=>({})); if(!r.ok) throw new Error('dict failed'); return d; }
-async function apiTTS(text, opts){
-  const gs = (typeof window !== 'undefined' ? (window.__picteractive_settings||{}) : {});
-  // Only send canonical voices the server understands (male|female). Otherwise omit.
-  const rawVoice = (opts?.voice ?? gs.tts_voice ?? '').toString().trim().toLowerCase();
-  const canonVoice = (rawVoice === 'male' || rawVoice === 'female') ? rawVoice : undefined;
-  const payload = {
-    text,
-    voice: canonVoice,
-    rate: (()=>{ 
-      const rv = (opts?.rate ?? gs.speaking_rate);
-      if (typeof rv === 'number') return rv;
-      if (rv != null && !Number.isNaN(Number(rv))) return Number(rv);
-      return undefined;
-    })(),
-  };
-  const r = await fetch(`${API}/api/tts`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
+// in App.jsx (where apiTTS lives)
+// in App.jsx
+async function apiTTS(text, opts = {}) {
+  // Guard: nothing to read
+  if (!text || !String(text).trim()) return null;
+
+  const hasWindow = typeof window !== "undefined";
+  const gs = hasWindow ? (window.__picteractive_settings || {}) : {};
+
+  // ----- VOICE (App voice + Female use the SAME voice) -----
+  // Priority: explicit opts.voice -> saved settings -> "App voice"
+  const effectiveVoice =
+    opts.voice != null && opts.voice !== ""
+      ? opts.voice
+      : (gs.tts_voice || "App voice");
+
+  const rawVoice = effectiveVoice.toString().trim().toLowerCase();
+
+  // Only exactly "male" is male. Everything else (including "female" and "app voice") is female.
+  let normalizedVoice = "female";
+  if (rawVoice === "male") {
+    normalizedVoice = "male";
+  }
+  // (App voice, Female, default, etc. all share the same 'female' branch)
+
+  // ----- RATE -----
+  // Priority: explicit opts.rate -> saved speaking_rate -> 1.0
+  const rateSource =
+    opts.rate != null && Number(opts.rate) > 0
+      ? Number(opts.rate)
+      : (Number(gs.speaking_rate) > 0 ? Number(gs.speaking_rate) : 1.0);
+
+  let rate = Number(rateSource);
+  if (!isFinite(rate) || rate <= 0) rate = 1.0;
+  // Clamp to a sensible Web Speech range
+  if (rate < 0.25) rate = 0.25;
+  if (rate > 3.0) rate = 3.0;
+
+  // ----- WEB SPEECH PATH (primary) -----
+  if (
+    hasWindow &&
+    "speechSynthesis" in window &&
+    "SpeechSynthesisUtterance" in window
+  ) {
+    const synth = window.speechSynthesis;
+
+    // Helper: wait for voices to be loaded
+    function loadVoices() {
+      return new Promise((resolve) => {
+        let voices = synth.getVoices();
+        if (voices && voices.length) {
+          resolve(voices);
+          return;
+        }
+        const interval = setInterval(() => {
+          voices = synth.getVoices();
+          if (voices && voices.length) {
+            clearInterval(interval);
+            resolve(voices);
+          }
+        }, 50);
+        // Safety timeout
+        setTimeout(() => {
+          clearInterval(interval);
+          resolve(voices || []);
+        }, 1000);
+      });
+    }
+
+    function pickVoice(voices, kind /* "male" | "female" */) {
+      if (!Array.isArray(voices) || !voices.length) return null;
+
+      const isEnglish = (v) =>
+        v && typeof v.lang === "string" && /^en(-|_|$)/i.test(v.lang);
+
+      const lowerMatches = (v, list) => {
+        const name = (v.name || "").toLowerCase();
+        return list.some((m) => name.includes(m));
+      };
+
+      if (kind === "male") {
+        // Prefer an English male-ish voice if we can guess it
+        const maleNames = ["male", "david", "christopher", "daniel", "fred"];
+        const byName = voices.find(
+          (v) => isEnglish(v) && lowerMatches(v, maleNames)
+        );
+        if (byName) return byName;
+
+        // Fallback: English UK often sounds "different" enough for kids
+        const enGb = voices.find(
+          (v) => isEnglish(v) && /en-GB/i.test(v.lang || "")
+        );
+        if (enGb) return enGb;
+      }
+
+      // Female / App voice → same base voice
+      const femaleNames = [
+        "female",
+        "zira",
+        "susan",
+        "samantha",
+        "karen",
+        "kathy",
+        "victoria",
+      ];
+      const femaleByName = voices.find(
+        (v) => isEnglish(v) && lowerMatches(v, femaleNames)
+      );
+      if (femaleByName) return femaleByName;
+
+      const firstEn = voices.find(isEnglish);
+      if (firstEn) return firstEn;
+
+      return voices[0] || null;
+    }
+
+    const voices = await loadVoices();
+    const chosen = pickVoice(voices, normalizedVoice);
+
+    // Cancel any previous utterances so settings apply immediately
+    synth.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(String(text));
+    utterance.rate = rate;
+    if (chosen) utterance.voice = chosen;
+
+    synth.speak(utterance);
+
+    // IMPORTANT:
+    // We return null to signal to callers (Story page, What’s This page)
+    // that Web Speech is already speaking and no <audio src> is needed.
+    return null;
+  }
+
+  // ----- FALLBACK: call backend /api/tts (gTTS) if Web Speech is not available -----
+  const serverVoice = normalizedVoice === "male" ? "male" : "female";
+
+  const res = await fetch(`${API}/api/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice: serverVoice, rate }),
   });
-  if(!r.ok) throw new Error('tts failed');
-  const b = await r.blob();
-  return URL.createObjectURL(b);
+
+  if (!res.ok) throw new Error("TTS failed");
+
+  const blob = await res.blob();
+  return URL.createObjectURL(blob); // used with <audio src="...">
 }
+
+
 
 async function apiQuiz(caption, count=3){ const r=await fetch(`${API}/api/quiz`,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ caption, count })}); const d=await r.json().catch(()=>({})); if(!r.ok||d?.error) throw new Error(d?.error||'quiz failed'); return (Array.isArray(d.questions)? d.questions: []).map(q=>({ question:q.question, options:q.options?.slice(0,3)||[], answerIndex: (typeof q.answerIndex==='number'? q.answerIndex : (typeof q.answer_index==='number'? q.answer_index : 0)) })); }
 async function apiAchEvent(type){ try{ await fetch(`${API}/api/achievements/event`, { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ type })}); }catch{} }
@@ -1395,26 +1526,70 @@ function StoryPage(){
   const flatWords = React.useMemo(() => segWords.flat(), [segWords]);
 
   async function speakStory() {
-    const fullText = [title, ...panels].filter(Boolean).join(" ").trim();
-    if (!fullText) return;
-  
-    try {
-      const gs = (typeof window !== 'undefined' ? (window.__picteractive_settings||{}) : {});
-      const src = await apiTTS(fullText, { voice: gs.tts_voice, rate: gs.speaking_rate });
-  
-      const a = ttsRef.current;
-      if (!a) return;
+  const fullText = [title, ...panels].filter(Boolean).join(" ").trim();
+  if (!fullText) return;
 
-      // Apply speaking rate from settings (0.5x / 1.0x / 1.5x).
-      const rate = (() => {
-        const rv = gs && typeof gs.speaking_rate !== 'undefined' ? gs.speaking_rate : 1.0;
-        if (typeof rv === 'number' && isFinite(rv) && rv > 0) return rv;
-        const n = Number(rv);
-        return isFinite(n) && n > 0 ? n : 1.0;
-      })();
-      a.playbackRate = rate;
+  try {
+    const gs =
+      typeof window !== "undefined" ? window.__picteractive_settings || {} : {};
 
-    // Clean up any previous listeners to avoid stacking
+    // Normalise rate from settings
+    const rate = (() => {
+      const rv =
+        gs && typeof gs.speaking_rate !== "undefined" ? gs.speaking_rate : 1.0;
+      if (typeof rv === "number" && isFinite(rv) && rv > 0) return rv;
+      const n = Number(rv);
+      return isFinite(n) && n > 0 ? n : 1.0;
+    })();
+
+    const highlightOn =
+      typeof document !== "undefined"
+        ? document.documentElement.getAttribute("data-tts-highlight") !== "0"
+        : true;
+
+    const a = ttsRef.current;
+
+    // Ask apiTTS for Web Speech or backend audio
+    const src = await apiTTS(fullText, {
+      voice: gs.tts_voice,
+      rate: rate,
+    });
+
+    // --- WEB SPEECH PATH (src === null) ---
+    if (!src) {
+      if (!highlightOn) return;
+
+      const nonSpace = flatWords.filter((w) => /\w/.test(w)).length || 1;
+      const estDuration = nonSpace * 0.30;
+      const baseStep = estDuration / nonSpace;
+      const step = Math.max(0.15, Math.min(0.10, baseStep / rate));
+
+      setStoryFocusIndex(-1);
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i >= flatWords.length) {
+          clearInterval(timer);
+          setStoryFocusIndex(-1);
+          return;
+        }
+        if (/\w/.test(flatWords[i])) setStoryFocusIndex(i);
+        i++;
+      }, step * 1000);
+
+      return;
+    }
+
+    // --- FALLBACK AUDIO ELEMENT PATH (when Web Speech not available) ---
+    if (!a) return;
+
+    a.src = src;
+    a.playbackRate = rate;
+
+    if (!highlightOn) {
+      a.play().catch(() => {});
+      return;
+    }
+
     const clean = () => {
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("ended", onEnd);
@@ -1428,41 +1603,32 @@ function StoryPage(){
     };
 
     const onTime = () => {
-      // Need a valid duration to compute progress
       if (!a.duration || !isFinite(a.duration) || a.duration <= 0) return;
-
       const ratio = Math.min(1, Math.max(0, a.currentTime / a.duration));
       let i = Math.floor(ratio * flatWords.length);
-
-      // Skip non-word tokens (spaces/punctuation) so highlight lands on words
       while (i < flatWords.length && !/\w/.test(flatWords[i])) i++;
-
-      if (i >= flatWords.length) {
-        setStoryFocusIndex(-1);
-      } else {
-        setStoryFocusIndex(i);
-      }
+      setStoryFocusIndex(i >= flatWords.length ? flatWords.length - 1 : i);
     };
 
-      const onMeta = () => {
-        // Start playback once we have metadata/buffer
-        a.play().catch(() => {});
-      };
-
-      // Wire events before setting src
+    const onMeta = () => {
+      a.removeEventListener("loadedmetadata", onMeta);
+      a.removeEventListener("canplaythrough", onMeta);
       a.addEventListener("timeupdate", onTime);
-      a.addEventListener("ended", onEnd);
-      a.addEventListener("loadedmetadata", onMeta, { once: true });
-      a.addEventListener("canplaythrough", onMeta, { once: true });
-  
-      // Kick off playback
-      a.src = src;
-      // Some browsers need an explicit load
-      try { a.load(); } catch {}
-    } catch {
-      show("TTS failed");
-    }
+      a.addEventListener("ended", onEnd, { once: true });
+    };
+
+    a.addEventListener("loadedmetadata", onMeta);
+    a.addEventListener("canplaythrough", onMeta);
+    a.addEventListener("timeupdate", onTime);
+    a.addEventListener("ended", onEnd, { once: true });
+
+    a.play().catch(() => {});
+  } catch {
+    show("TTS failed");
   }
+}
+
+
 
 
   // React to settings changes (e.g., voice/rate) mid-session
@@ -1595,11 +1761,15 @@ async function saveStoryAsImage(){
   // Logo
   const logoImg = await loadImage(siteLogo);
 
-  // --- Layout ---
-  const W = 1400, P = 40, cardR = 34, rowGap = 34, pillH = 82;
-  const titleSize = 56, bodySize = 28;
-  const thumbBox = 150, thumbPad = 18, thumbBorder = 10;
-  const panelHeight = Math.max(thumbBox + thumbPad*2, 160);
+    // --- Layout (export image only) ---
+    // Aim for a roughly 1080-wide square-friendly image. Height is dynamic
+    // but usually close to 1080px for 3 panels.
+    const W = 1080, P = 40, cardR = 34, rowGap = 34, pillH = 90;
+    const titleSize = 60, bodySize = 30;
+    // Saved-image thumbnail (drawing panel) sizing: make it larger than on-screen,
+    // with a thinner black frame.
+    const thumbBox = 260, thumbPad = 24, thumbBorder = 6;
+    const panelHeight = Math.max(thumbBox + thumbPad*2, 260);
 
   const measure = document.createElement('canvas').getContext('2d');
   const fontTitle = `900 ${titleSize}px "League Spartan", system-ui, Arial`;
@@ -1660,36 +1830,36 @@ async function saveStoryAsImage(){
   y += pillH + 30;
 
   // Panels
-  for (let i=0;i<3;i++){
-    c.fillStyle = '#fff'; roundRect(innerX,y,innerW,panelHeight,26); c.fill();
-
-    // thumb frame
-    const tX = innerX + 24;
-    const tY = y + (panelHeight - (thumbBox + thumbBorder*2)) / 2;
-    c.fillStyle = '#ffffff'; roundRect(tX, tY, thumbBox + thumbBorder*2, thumbBox + thumbBorder*2, 18); c.fill();
-    c.lineWidth = thumbBorder; c.strokeStyle = '#2f5b2a';
-    roundRect(tX + thumbBorder/2, tY + thumbBorder/2, thumbBox + thumbBorder, thumbBox + thumbBorder, 18); c.stroke();
-
-    const im = panelImgs[i];
-    if (im){
-      const box = thumbBox - thumbBorder;
-      const scale = Math.min(box / im.width, box / im.height);
-      const dw = im.width * scale, dh = im.height * scale;
-      const drawX = tX + thumbBorder + (box - dw)/2;
-      const drawY = tY + thumbBorder + (box - dh)/2;
-      c.save(); roundRect(tX + thumbBorder, tY + thumbBorder, box, box, 14); c.clip();
-      c.drawImage(im, drawX, drawY, dw, dh); c.restore();
+    for (let i=0;i<3;i++){
+      c.fillStyle = '#fff'; roundRect(innerX,y,innerW,panelHeight,26); c.fill();
+  
+      // thumb frame
+      const tX = innerX + 24;
+      const tY = y + (panelHeight - (thumbBox + thumbBorder*2)) / 2;
+      c.fillStyle = '#ffffff'; roundRect(tX, tY, thumbBox + thumbBorder*2, thumbBox + thumbBorder*2, 22); c.fill();
+      c.lineWidth = thumbBorder; c.strokeStyle = '#000000';
+      roundRect(tX + thumbBorder/2, tY + thumbBorder/2, thumbBox + thumbBorder, thumbBox + thumbBorder, 22); c.stroke();
+  
+      const im = panelImgs[i];
+      if (im){
+        const box = thumbBox - thumbBorder;
+        const scale = Math.min(box / im.width, box / im.height);
+        const dw = im.width * scale, dh = im.height * scale;
+        const drawX = tX + thumbBorder + (box - dw)/2;
+        const drawY = tY + thumbBorder + (box - dh)/2;
+        c.save(); roundRect(tX + thumbBorder, tY + thumbBorder, box, box, 18); c.clip();
+        c.drawImage(im, drawX, drawY, dw, dh); c.restore();
+      }
+  
+      // text
+      const textLeft = tX + thumbBorder*2 + thumbBox + 32;
+      c.font = fontBody; c.fillStyle = '#000'; c.textAlign = 'left'; c.textBaseline = 'top';
+      const rows = panelRows[i] || [''];
+      let ty = y + (panelHeight - (rows.length * (bodySize + 10))) / 2;
+      for (const r of rows){ c.fillText(r, textLeft, ty); ty += (bodySize + 10); }
+  
+      y += panelHeight + rowGap;
     }
-
-    // text
-    const textLeft = tX + thumbBorder*2 + thumbBox + 24;
-    c.font = fontBody; c.fillStyle = '#000'; c.textAlign = 'left'; c.textBaseline = 'top';
-    const rows = panelRows[i] || [''];
-    let ty = y + (panelHeight - (rows.length * (bodySize + 10))) / 2;
-    for (const r of rows){ c.fillText(r, textLeft, ty); ty += (bodySize + 10); }
-
-    y += panelHeight + rowGap;
-  }
 
   // Footer pill + logo + text
   c.fillStyle = '#fff'; roundRect(innerX,y,innerW,pillH,40); c.fill();
@@ -2004,7 +2174,119 @@ async function startCamera() {
 }
 
 
-  async function doCaption(region=null, blobOverride=null){ const blob=blobOverride||imgBlob; if(!blob){ show('Please upload or capture an image first'); return; } closeDictionary(); setLoading(true); setCaption(''); setFocusIndex(-1); try{ const text=await apiCaption(blob, region); const clean=String(text||'').trim(); const out = clean && clean.toLowerCase()!=='none'? clean : ''; setCaption(out); if(out) originalCaptionRef.current = out; if(out){ await apiAchEvent('caption'); await refetchMe().catch(()=>{}); } if(region) setIsCropped(true);} catch(e){ show(e.message||'Caption failed'); } finally{ setLoading(false);} }  async function speak(){ const t=caption.trim(); if(!t) return; try{ const gs=(typeof window!=='undefined'?(window.__picteractive_settings||{}):{}); const src=await apiTTS(t,{ voice: gs.tts_voice, rate: gs.speaking_rate }); const a=audioRef.current; if(!a) return; const rate=(()=>{ const rv=gs&&typeof gs.speaking_rate!=='undefined'? gs.speaking_rate:1.0; if(typeof rv==='number'&&isFinite(rv)&&rv>0) return rv; const n=Number(rv); return isFinite(n)&&n>0?n:1.0; })(); a.playbackRate=rate; a.src=src; const words=t.split(/(\s+)/); const onReady=()=>{ a.play().catch(()=>{}); const step=a.duration>0&&words.length? a.duration/words.length:0.35; let i=0; const timer=setInterval(()=>{ if(i>=words.length){ clearInterval(timer); setFocusIndex(-1); return;} if(/\\w/.test(words[i])) setFocusIndex(i); i++; }, step*1000); a.addEventListener('ended',()=>{ clearInterval(timer); setFocusIndex(-1); }, { once:true }); }; a.addEventListener('canplaythrough', onReady, { once:true }); } catch { show('TTS failed'); } }
+  async function doCaption(region=null, blobOverride=null){ const blob=blobOverride||imgBlob; if(!blob){ show('Please upload or capture an image first'); return; } closeDictionary(); setLoading(true); setCaption(''); setFocusIndex(-1); try{ const text=await apiCaption(blob, region); const clean=String(text||'').trim(); const out = clean && clean.toLowerCase()!=='none'? clean : ''; setCaption(out); if(out) originalCaptionRef.current = out; if(out){ await apiAchEvent('caption'); await refetchMe().catch(()=>{}); } if(region) setIsCropped(true);} catch(e){ show(e.message||'Caption failed'); } finally{ setLoading(false);} }  
+  async function speak() {
+  const text = caption.trim();
+  if (!text) return;
+
+  try {
+    const hasWindow = typeof window !== "undefined";
+    const gs = hasWindow ? (window.__picteractive_settings || {}) : {};
+
+    // Normalise rate from settings
+    const rate = (() => {
+      const rv =
+        gs && typeof gs.speaking_rate !== "undefined" ? gs.speaking_rate : 1.0;
+      if (typeof rv === "number" && isFinite(rv) && rv > 0) return rv;
+      const n = Number(rv);
+      return isFinite(n) && n > 0 ? n : 1.0;
+    })();
+
+    // Check if word highlight is enabled (Settings → Word highlight)
+    const highlightOn =
+      typeof document !== "undefined"
+        ? document.documentElement.getAttribute("data-tts-highlight") !== "0"
+        : true;
+
+    // Ask apiTTS to either:
+    //  - speak via Web Speech (returns null), OR
+    //  - give us an audio src (fallback path)
+    const src = await apiTTS(text, {
+      voice: gs.tts_voice,
+      rate: rate,
+    });
+
+    // --- WEB SPEECH PATH (src === null) ---
+    // Web Speech is already speaking; we just drive a timer for highlights.
+    if (!src) {
+      if (!highlightOn) return;
+
+      const nonSpace = words.filter((w) => /\w/.test(w)).length || 1;
+      // Rough estimate: ~0.35s per word at rate 1.0
+      const estDuration = nonSpace * 0.30;
+      const baseStep = estDuration / nonSpace;
+      const step = Math.max(0.15, Math.min(0.10, baseStep / rate)); // seconds per word
+
+      setFocusIndex(-1);
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i >= words.length) {
+          clearInterval(timer);
+          setFocusIndex(-1);
+          return;
+        }
+        if (/\w/.test(words[i])) setFocusIndex(i);
+        i++;
+      }, step * 1000);
+
+      return;
+    }
+
+    // --- FALLBACK AUDIO ELEMENT PATH (old behaviour, when Web Speech not available) ---
+    const a = audioRef.current;
+    if (!a) return;
+
+    a.src = src;
+    a.playbackRate = rate;
+
+    // If highlight is off, just play the audio
+    if (!highlightOn) {
+      a.play().catch(() => {});
+      return;
+    }
+
+    setFocusIndex(-1);
+
+    let timer;
+    const onReady = () => {
+      const nonSpace = words.filter((w) => /\w/.test(w)).length || 1;
+      const duration =
+        a.duration && isFinite(a.duration) && a.duration > 0
+          ? a.duration
+          : nonSpace * 0.35;
+      const baseStep = duration / nonSpace;
+      const step = Math.max(0.2, Math.min(0.8, baseStep / rate));
+
+      let i = 0;
+      timer = setInterval(() => {
+        if (i >= words.length) {
+          clearInterval(timer);
+          setFocusIndex(-1);
+          return;
+        }
+        if (/\w/.test(words[i])) setFocusIndex(i);
+        i++;
+      }, step * 1000);
+    };
+
+    const onEnd = () => {
+      if (timer) clearInterval(timer);
+      setFocusIndex(-1);
+      a.removeEventListener("canplaythrough", onReady);
+      a.removeEventListener("ended", onEnd);
+    };
+
+    a.addEventListener("canplaythrough", onReady, { once: true });
+    a.addEventListener("ended", onEnd, { once: true });
+
+    a.play().catch(() => {});
+  } catch {
+    show("TTS failed");
+  }
+}
+
+
+
   function clearAll(){ setImgUrl(""); setImgBlob(null); setOrigBlob(null); setCvdBase(null); setIsCropped(false); setCaption(""); stopCamera(); setFocusIndex(-1); closeDictionary(); }
   function revertCrop(){ if(origBlob){ setImgBlob(origBlob); setImgUrl(URL.createObjectURL(origBlob)); setCvdBase(origBlob); setIsCropped(false); } }
 
@@ -2775,6 +3057,7 @@ function SettingsPage(){
   function set(key, val){ setForm(v => ({ ...v, [key]: val })); }
 
   // live preview of accessibility items
+    // live preview of accessibility items
   useEffect(() => {
     try {
       applyAccessibility({
@@ -2789,9 +3072,16 @@ function SettingsPage(){
       });
     } catch {}
   }, [
-    form.dyslexia_font, form.high_contrast, form.bw_mode,
-    form.grid_guides, form.tts_voice, form.speaking_rate, form.word_highlight_color
+    form.dyslexia_font,
+    form.high_contrast,
+    form.bw_mode,
+    form.word_highlight_enable, // <-- added so toggle triggers applyAccessibility
+    form.grid_guides,
+    form.tts_voice,
+    form.speaking_rate,
+    form.word_highlight_color,
   ]);
+
 
   // profile actions (keep existing endpoints)
   async function changeDisplayName() {
@@ -3109,45 +3399,21 @@ async function changeEmail() {
                   </div>
                   <div style={{ marginTop: 16 }}>
                     <button className="btn btn-blue" onClick={async () => {
-                      const pickVoice = (gender) => {
                         try{
-                          const list = window.speechSynthesis?.getVoices?.() || [];
-                          if (!gender || gender === 'App voice' || !list.length) return null;
-                          const malePat = /male|dan|fred|sam|david|george|barry|paul|mike|john|alex|tom|mark|james|richard|brian|adam|robert|ryan/i;
-                          const femalePat = /female|susan|sara|ava|samantha|victoria|zira|zoe|karen|tessa|anna|jess|amy|emma|natalie|olivia|vicki|sarah|linda|catherine|heather|lisa|mary|julia|linda/i;
-                          const pat = gender === 'male' ? malePat : femalePat;
-                          // Prefer English voices when selecting by gender
-                          const sorted = [...list].sort((a,b)=>{
-                            const ae = /en/i.test(a.lang) ? 0 : 1;
-                            const be = /en/i.test(b.lang) ? 0 : 1;
-                            return ae - be;
+                          const voice = form.tts_voice;
+                          const rateNum = parseFloat(form.speaking_rate) || 1.0;
+                          // Use the same backend + audio pipeline as captions/story
+                          const src = await apiTTS("This is a preview of your text-to-speech settings.", {
+                            voice,
+                            rate: rateNum,
                           });
-                          for(const v of sorted){
-                            const nm = (v.name || v.voiceURI || '').toString();
-                            if (pat.test(nm)) return v;
-                          }
-                        }catch{}
-                        return null;
-                      };
-                      const ensureVoices = () => new Promise((res)=>{
-                        try{
-                          const has = window.speechSynthesis?.getVoices?.().length;
-                          if (has) return res();
-                          const on = () => { window.speechSynthesis.removeEventListener('voiceschanged', on); res(); };
-                          window.speechSynthesis.addEventListener('voiceschanged', on);
-                          // Fallback timeout
-                          setTimeout(()=>{ try{ window.speechSynthesis.removeEventListener('voiceschanged', on);}catch{} res(); }, 600);
-                        }catch{ res(); }
-                      });
-                      await ensureVoices();
-                      const msg = new SpeechSynthesisUtterance("This is a preview of your text-to-speech settings.");
-                      msg.rate = parseFloat(form.speaking_rate) || 1;
-                      const vv = (form.tts_voice || '').toString().toLowerCase();
-                      const chosen = pickVoice(vv);
-                      if (chosen) msg.voice = chosen;
-                      window.speechSynthesis.cancel();
-                      window.speechSynthesis.speak(msg);
-                    }}> Preview </button>
+                          const audio = new Audio(src);
+                          audio.playbackRate = (rateNum > 0 && isFinite(rateNum)) ? rateNum : 1.0;
+                          audio.play().catch(()=>{});
+                        }catch(e){
+                          console.error("TTS preview failed", e);
+                        }
+                      }}> Preview </button>
                           </div>
                 </div>
               </>
